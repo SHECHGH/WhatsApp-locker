@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.Context
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -81,7 +82,6 @@ class LockService : AccessibilityService() {
                     Log.d(TAG, "Session monitor: user left WhatsApp; resetting unlocked")
                     setUnlockedForWhatsApp(false)
                     clearLastAuthTs()
-                    // opcional: actualizar lastPackage
                     lastPackage = currentPkg
                     stopSessionMonitor()
                     return
@@ -113,11 +113,21 @@ class LockService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         try {
-            registerReceiver(resetReceiver, IntentFilter("com.whatsapplock.action.RESET_LAST_PACKAGE"))
-            registerReceiver(authReceiver, IntentFilter("com.whatsapplock.action.AUTH_SUCCESS"))
-            Log.d(TAG, "resetReceiver & authReceiver registered")
-        } catch (e: Exception) {
+            // Android 13+ requiere indicar si el receiver será expuesto o no.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(resetReceiver, IntentFilter("com.whatsapplock.action.RESET_LAST_PACKAGE"), Context.RECEIVER_NOT_EXPORTED)
+                registerReceiver(authReceiver, IntentFilter("com.whatsapplock.action.AUTH_SUCCESS"), Context.RECEIVER_NOT_EXPORTED)
+                Log.d(TAG, "resetReceiver & authReceiver registered (RECEIVER_NOT_EXPORTED)")
+            } else {
+                registerReceiver(resetReceiver, IntentFilter("com.whatsapplock.action.RESET_LAST_PACKAGE"))
+                registerReceiver(authReceiver, IntentFilter("com.whatsapplock.action.AUTH_SUCCESS"))
+                Log.d(TAG, "resetReceiver & authReceiver registered (legacy)")
+            }
+        } catch (e: SecurityException) {
             Log.e(TAG, "Failed to register receivers", e)
+            // Fallback: no podemos registrar; seguir sin receivers (evita crash)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register receivers (unknown)", e)
         }
     }
 
@@ -199,11 +209,11 @@ class LockService : AccessibilityService() {
         super.onDestroy()
         try {
             unregisterReceiver(resetReceiver)
+        } catch (e: Exception) { /* ignore */ }
+        try {
             unregisterReceiver(authReceiver)
-            stopSessionMonitor()
-            Log.d(TAG, "receivers unregistered and monitor stopped")
-        } catch (e: Exception) {
-            // ignore
-        }
+        } catch (e: Exception) { /* ignore */ }
+        stopSessionMonitor()
+        Log.d(TAG, "receivers unregistered and monitor stopped")
     }
 }
