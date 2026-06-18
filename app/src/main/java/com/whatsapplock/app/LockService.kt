@@ -25,6 +25,10 @@ class LockService : AccessibilityService() {
     private var lastPackage: String? = null
     private var lastShowTime: Long = 0L
 
+    // Contador de lecturas consecutivas "fuera de WhatsApp" para evitar falsos positivos
+    private var awayCount = 0
+    private val AWAY_THRESHOLD = 3
+
     private fun prefs() = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private fun isUnlockedForWhatsApp(): Boolean = prefs().getBoolean(KEY_UNLOCKED, false)
     private fun setUnlockedForWhatsApp(value: Boolean) = prefs().edit().putBoolean(KEY_UNLOCKED, value).apply()
@@ -60,16 +64,25 @@ class LockService : AccessibilityService() {
                 val root = rootInActiveWindow
                 val currentPkg = root?.packageName?.toString() ?: "null"
 
-                Log.d(TAG, "Session monitor: activePkg=$currentPkg target=$targetPackage")
+                Log.d(TAG, "Session monitor: activePkg=$currentPkg target=$targetPackage awayCount=$awayCount")
 
-                if (currentPkg != targetPackage) {
-                    // El usuario ya no está en WhatsApp -> reset
-                    Log.d(TAG, "Session monitor: user left WhatsApp; resetting unlocked")
-                    setUnlockedForWhatsApp(false)
-                    clearLastAuthTs()
-                    lastPackage = currentPkg
-                    stopSessionMonitor()
-                    return
+                // Solo contamos como "fuera" si el paquete es real y distinto al target.
+                // Ignoramos lecturas "null" (transitorias durante animaciones/cambios de pantalla).
+                if (currentPkg != targetPackage && currentPkg != "null") {
+                    awayCount++
+                    Log.d(TAG, "Session monitor: away from WhatsApp, count=$awayCount")
+                    if (awayCount >= AWAY_THRESHOLD) {
+                        Log.d(TAG, "Session monitor: confirmed user left WhatsApp; resetting unlocked")
+                        setUnlockedForWhatsApp(false)
+                        clearLastAuthTs()
+                        lastPackage = currentPkg
+                        awayCount = 0
+                        stopSessionMonitor()
+                        return
+                    }
+                } else {
+                    // Estamos de vuelta en WhatsApp (o lectura transitoria null) -> reset del contador
+                    awayCount = 0
                 }
 
             } catch (e: Exception) {
@@ -85,12 +98,14 @@ class LockService : AccessibilityService() {
     private fun startSessionMonitor() {
         if (monitoring) return
         monitoring = true
+        awayCount = 0
         handler.post(monitorRunnable)
         Log.d(TAG, "Session monitor started")
     }
 
     private fun stopSessionMonitor() {
         monitoring = false
+        awayCount = 0
         handler.removeCallbacks(monitorRunnable)
         Log.d(TAG, "Session monitor stopped")
     }
@@ -160,8 +175,11 @@ class LockService : AccessibilityService() {
             stopSessionMonitor()
         }
 
-        // lógica principal: si vemos com.whatsapp, mostramos LockActivity si corresponde
-        // y reseteamos unlocked cuando salimos de com.whatsapp.
+        // lógica principal: si vemos com.whatsapp, mostramos LockActivity si corresponde.
+        // NOTA: el reset de "unlocked" cuando se sale de WhatsApp ya NO se hace aquí;
+        // es responsabilidad exclusiva del monitorRunnable (que filtra falsos positivos
+        // con AWAY_THRESHOLD), para evitar dobles disparos y bloqueos prematuros
+        // al navegar entre pantallas internas de WhatsApp (chats, Estados, Ajustes, etc).
         if (pkg == targetPackage) {
             Log.d(TAG, "Saw package == targetPackage; unlocked=${isUnlockedForWhatsApp()} last=$lastPackage")
             // Si está desbloqueado, arrancar monitor si no se está ejecutando (fallback robusto)
@@ -185,14 +203,6 @@ class LockService : AccessibilityService() {
                 } else {
                     Log.d(TAG, "Last package was self; skipping showLockScreen this pass")
                 }
-            }
-        } else {
-            // Si salimos de WhatsApp, reseteamos el flag y limpiamos la marca de tiempo
-            if (lastPackage == targetPackage && pkg != targetPackage) {
-                Log.d(TAG, "Detected exit from WhatsApp on event. Resetting unlocked flag and clearing lastAuthTs.")
-                setUnlockedForWhatsApp(false)
-                clearLastAuthTs()
-                stopSessionMonitor()
             }
         }
 
