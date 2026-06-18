@@ -1,7 +1,6 @@
 package com.whatsapplock.app
 
 import android.app.ActivityManager
-import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
@@ -16,6 +15,11 @@ class LockActivity : AppCompatActivity() {
     private val TAG = "LockActivity"
     private val REQUEST_CODE = 1001
 
+    // Keys for SharedPreferences
+    private val PREFS_NAME = "whlock_prefs"
+    private val KEY_UNLOCKED = "unlocked_whatsapp"
+    private val KEY_LAST_AUTH_TS = "last_authenticated_at"
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // No es necesario setContentView si solo usamos BiometricPrompt
@@ -28,15 +32,18 @@ class LockActivity : AppCompatActivity() {
         val callback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                 Log.d(TAG, "Authentication succeeded")
-                val prefs = getSharedPreferences("whlock_prefs", Context.MODE_PRIVATE)
-                prefs.edit().putBoolean("unlocked_whatsapp", true).apply()
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putBoolean(KEY_UNLOCKED, true)
+                    .putLong(KEY_LAST_AUTH_TS, System.currentTimeMillis())
+                    .apply()
                 finish()
             }
 
             override fun onAuthenticationFailed() {
                 Log.d(TAG, "Authentication failed")
-                val prefs = getSharedPreferences("whlock_prefs", Context.MODE_PRIVATE)
-                prefs.edit().putBoolean("unlocked_whatsapp", false).apply()
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit().putBoolean(KEY_UNLOCKED, false).apply()
 
                 // Intentamos cerrar WhatsApp si el usuario cancela
                 killWhatsAppProcess()
@@ -50,8 +57,8 @@ class LockActivity : AppCompatActivity() {
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                 Log.d(TAG, "Authentication error $errorCode: $errString")
-                val prefs = getSharedPreferences("whlock_prefs", Context.MODE_PRIVATE)
-                prefs.edit().putBoolean("unlocked_whatsapp", false).apply()
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit().putBoolean(KEY_UNLOCKED, false).apply()
 
                 // Intentamos cerrar WhatsApp si hay error (o cancelación)
                 killWhatsAppProcess()
