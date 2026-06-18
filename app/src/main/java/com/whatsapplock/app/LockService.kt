@@ -3,6 +3,8 @@ package com.whatsapplock.app
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.content.Context
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
@@ -16,6 +18,24 @@ class LockService : AccessibilityService() {
     private fun prefs() = getSharedPreferences("whlock_prefs", Context.MODE_PRIVATE)
     private fun isUnlockedForWhatsApp(): Boolean = prefs().getBoolean("unlocked_whatsapp", false)
     private fun setUnlockedForWhatsApp(value: Boolean) = prefs().edit().putBoolean("unlocked_whatsapp", value).apply()
+
+    // Receiver para resetear lastPackage cuando LockActivity notifica cancelación
+    private val resetReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "Received reset broadcast; clearing lastPackage")
+            lastPackage = null
+        }
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        try {
+            registerReceiver(resetReceiver, IntentFilter("com.whatsapplock.action.RESET_LAST_PACKAGE"))
+            Log.d(TAG, "resetReceiver registered")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register resetReceiver", e)
+        }
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -31,31 +51,26 @@ class LockService : AccessibilityService() {
             return
         }
 
-        if (pkg != lastPackage) {
-            Log.d(TAG, "package changed: $lastPackage -> $pkg")
+        // lógica principal: si vemos com.whatsapp, mostramos LockActivity si corresponde
+        // y reseteamos unlocked cuando salimos de com.whatsapp.
+        val now = System.currentTimeMillis()
 
-            // Entrando a WhatsApp
-            if (pkg == targetPackage) {
-                Log.d(TAG, "Detected entry to WhatsApp; unlocked=${isUnlockedForWhatsApp()}")
-                // Evita relanzar si ya está desbloqueado, si la última package es la propia app,
-                // o si acabamos de mostrar la pantalla (debounce)
-                val now = System.currentTimeMillis()
-                if (!isUnlockedForWhatsApp() && lastPackage != packageName && (now - lastShowTime) > 1000L) {
-                    lastShowTime = now
-                    showLockScreen()
-                } else {
-                    Log.d(TAG, "No need to show lock (already unlocked, lastPackage==self, or debounce).")
-                }
+        if (pkg == targetPackage) {
+            Log.d(TAG, "Saw package == targetPackage; unlocked=${isUnlockedForWhatsApp()} last=$lastPackage")
+            if (!isUnlockedForWhatsApp() && lastPackage != packageName && (now - lastShowTime) > 1000L) {
+                lastShowTime = now
+                showLockScreen()
+            } else {
+                Log.d(TAG, "No need to show lock (already unlocked, lastPackage==self, or debounce).")
             }
-
-            // Si salimos de WhatsApp, reseteamos el flag de desbloqueo
+        } else {
             if (lastPackage == targetPackage && pkg != targetPackage) {
                 Log.d(TAG, "Detected exit from WhatsApp. Resetting unlocked flag.")
                 setUnlockedForWhatsApp(false)
             }
-
-            lastPackage = pkg
         }
+
+        lastPackage = pkg
     }
 
     private fun showLockScreen() {
@@ -71,5 +86,15 @@ class LockService : AccessibilityService() {
 
     override fun onInterrupt() {
         Log.d(TAG, "onInterrupt")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(resetReceiver)
+            Log.d(TAG, "resetReceiver unregistered")
+        } catch (e: Exception) {
+            // ignore
+        }
     }
 }
