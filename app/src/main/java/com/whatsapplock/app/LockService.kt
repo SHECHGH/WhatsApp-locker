@@ -18,16 +18,19 @@ class LockService : AccessibilityService() {
     private val PREFS_NAME = "whlock_prefs"
     private val KEY_UNLOCKED = "unlocked_whatsapp"
     private val KEY_LAST_AUTH_TS = "last_authenticated_at"
-    private val KEY_SUPPRESS_UNTIL = "suppress_until_ms"
+    private val KEY_SUPPRESS_UNTIL = "suppress_until_ms" // kept as key name only; suppression is in-memory now
 
     // Timeout para reset automático después de autenticación exitosa (ms)
     private val UNLOCK_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutos
 
+    // Límite máximo de supresión tras Cancel (por seguridad)
+    private val MAX_SUPPRESS_MS = 30_000L // 30 segundos
+
     private var lastPackage: String? = null
     private var lastShowTime: Long = 0L
 
-    // Supresión temporal después de Cancel (ms epoch)
-    private var suppressUntilMs: Long = 0L
+    // Supresión temporal después de Cancel (epoch ms). SOLO EN MEMORIA.
+    @Volatile private var suppressUntilMs: Long = 0L
 
     private fun prefs() = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private fun isUnlockedForWhatsApp(): Boolean = prefs().getBoolean(KEY_UNLOCKED, false)
@@ -36,15 +39,28 @@ class LockService : AccessibilityService() {
     private fun setLastAuthTs(ts: Long) = prefs().edit().putLong(KEY_LAST_AUTH_TS, ts).apply()
     private fun clearLastAuthTs() = prefs().edit().remove(KEY_LAST_AUTH_TS).apply()
 
-    private fun setSuppressUntil(untilMs: Long) {
-        suppressUntilMs = untilMs
-        prefs().edit().putLong(KEY_SUPPRESS_UNTIL, untilMs).apply()
-    }
-    private fun loadSuppressUntil() {
-        suppressUntilMs = prefs().getLong(KEY_SUPPRESS_UNTIL, 0L)
+    /**
+     * Establece suppressUntil en memoria.
+     * untilEpochMs debe ser epoch ms absoluto (System.currentTimeMillis() + suppressMs).
+     * Se aplica un tope MAX_SUPPRESS_MS para evitar supresiones eternas por error.
+     */
+    private fun setSuppressUntil(untilEpochMs: Long) {
+        val now = System.currentTimeMillis()
+        suppressUntilMs = when {
+            untilEpochMs <= now -> 0L // no suppression if the target time is already passed or zero
+            (untilEpochMs - now) > MAX_SUPPRESS_MS -> now + MAX_SUPPRESS_MS
+            else -> untilEpochMs
+        }
+        Log.d(TAG, "setSuppressUntil: in-memory suppressUntilMs=$suppressUntilMs")
     }
 
-    // Handler + Runnable para monitor periodic (usa rootInActiveWindow)
+    private fun loadSuppressUntil() {
+        // Ya no cargamos de prefs: inicializamos a 0 (sin supresión) al arrancar el servicio.
+        suppressUntilMs = 0L
+        Log.d(TAG, "loadSuppressUntil: suppression in-memory cleared on service start")
+    }
+
+    // Handler + Runnable para monitor periódico (usa rootInActiveWindow)
     private val handler = Handler(Looper.getMainLooper())
     @Volatile private var monitoring = false
     private val monitorRunnable = object : Runnable {
@@ -113,7 +129,7 @@ class LockService : AccessibilityService() {
             Log.d(TAG, "Received RESET_LAST_PACKAGE; clearing lastPackage")
             lastPackage = null
 
-            // Si vienen ms de supresión, aplicarlos
+            // Si vienen ms de supresión, aplicarlos (se calcula as now + suppress_ms en el emitter)
             val suppressMs = intent?.getLongExtra("suppress_ms", 0L) ?: 0L
             if (suppressMs > 0L) {
                 val until = System.currentTimeMillis() + suppressMs
@@ -131,15 +147,16 @@ class LockService : AccessibilityService() {
             val ts = intent?.getLongExtra("auth_ts", System.currentTimeMillis()) ?: System.currentTimeMillis()
             setLastAuthTs(ts)
             setUnlockedForWhatsApp(true)
-            // Limpia supresión si quedara
-            setSuppressUntil(0L)
+            // Limpia supresión en memoria si quedara
+            suppressUntilMs = 0L
+            Log.d(TAG, "Cleared in-memory suppression after AUTH_SUCCESS")
             startSessionMonitor()
         }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        // cargar supresión previa si existe
+        // inicializar supresión en memoria
         loadSuppressUntil()
         try {
             // Android 13+ requiere indicar si el receiver será expuesto o no.
@@ -225,6 +242,9 @@ class LockService : AccessibilityService() {
                 setUnlockedForWhatsApp(false)
                 clearLastAuthTs()
                 stopSessionMonitor()
+                // Limpiar cualquier supresión en memoria al salir de WhatsApp
+                suppressUntilMs = 0L
+                Log.d(TAG, "Cleared in-memory suppression on exit from WhatsApp")
             }
         }
 
