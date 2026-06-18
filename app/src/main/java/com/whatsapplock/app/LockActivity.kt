@@ -13,7 +13,6 @@ import androidx.core.content.ContextCompat
 class LockActivity : AppCompatActivity() {
 
     private val TAG = "LockActivity"
-    private val REQUEST_CODE = 1001
 
     // Keys for SharedPreferences
     private val PREFS_NAME = "whlock_prefs"
@@ -37,6 +36,11 @@ class LockActivity : AppCompatActivity() {
                     .putBoolean(KEY_UNLOCKED, true)
                     .putLong(KEY_LAST_AUTH_TS, System.currentTimeMillis())
                     .apply()
+
+                // Notificamos al servicio que arrancó una sesión autenticada
+                val authIntent = Intent("com.whatsapplock.action.AUTH_SUCCESS")
+                sendBroadcast(authIntent)
+
                 finish()
             }
 
