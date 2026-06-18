@@ -1,31 +1,46 @@
 name: Build Android APK
 
-# Elige cuándo se va a ejecutar este flujo de trabajo
+# Cuándo ejecutar el workflow
 on:
   push:
-    branches: [ "main", "master" ] # Se ejecuta cuando subes cambios a main o master
+    branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: # Esto te permite activar el botón de ejecución manual en GitHub
+  workflow_dispatch: # permite ejecución manual
 
 jobs:
   build:
-    runs-on: ubuntu-latest # El sistema operativo virtual donde correrá el proceso
+    runs-on: ubuntu-latest
 
     steps:
-      # 1. Descarga el código de tu repositorio en la máquina virtual
       - name: Checkout del código
         uses: actions/checkout@v4
 
-      # 2. Configura Java (necesario para compilar aplicaciones Android)
+      - name: Cache de Gradle (acelera builds)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            app/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
       - name: Configurar JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
           distribution: 'temurin'
+          java-version: '17'
+          cache: gradle
 
-      # 3. Tus comandos para compilar el APK (lo que tenías originalmente)
       - name: Build Debug APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
