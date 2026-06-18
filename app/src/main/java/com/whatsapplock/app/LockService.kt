@@ -26,7 +26,9 @@ class LockService : AccessibilityService() {
 
         Log.d(TAG, "onAccessibilityEvent type=$eventType pkg=$pkg cls=$cls title=$title last=$lastPackage unlocked=${isUnlockedForWhatsApp()}")
 
-        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && eventType != AccessibilityEvent.TYPE_WINDOW_CHANGED) {
+        // Manejar ambos tipos válidos: estado de ventana y cambios de contenido
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            && eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
             return
         }
 
