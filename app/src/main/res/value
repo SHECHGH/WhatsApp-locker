@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WhatsApp Locker</string>
+    <string name="accessibility_description">Servicio de accesibilidad para bloquear WhatsApp y detectar ventanas de la app</string>
+</resources>
