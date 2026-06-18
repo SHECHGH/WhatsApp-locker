@@ -11,6 +11,7 @@ class LockService : AccessibilityService() {
     private val TAG = "LockService"
     private var lastPackage: String? = null
     private val targetPackage = "com.whatsapp"
+    private var lastShowTime: Long = 0L
 
     private fun prefs() = getSharedPreferences("whlock_prefs", Context.MODE_PRIVATE)
     private fun isUnlockedForWhatsApp(): Boolean = prefs().getBoolean("unlocked_whatsapp", false)
@@ -21,12 +22,10 @@ class LockService : AccessibilityService() {
 
         val eventType = event.eventType
         val pkg = event.packageName?.toString() ?: "null"
-        val cls = event.className?.toString() ?: "null"
-        val title = event.contentDescription?.toString() ?: (event.text?.joinToString() ?: "")
 
-        Log.d(TAG, "onAccessibilityEvent type=$eventType pkg=$pkg cls=$cls title=$title last=$lastPackage unlocked=${isUnlockedForWhatsApp()}")
+        Log.d(TAG, "onAccessibilityEvent type=$eventType pkg=$pkg last=$lastPackage unlocked=${isUnlockedForWhatsApp()}")
 
-        // Manejar ambos tipos válidos: estado de ventana y cambios de contenido
+        // Manejar tipos compatibles: cambio de ventana o cambios en contenido de la ventana
         if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
             && eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
             return
@@ -35,15 +34,21 @@ class LockService : AccessibilityService() {
         if (pkg != lastPackage) {
             Log.d(TAG, "package changed: $lastPackage -> $pkg")
 
+            // Entrando a WhatsApp
             if (pkg == targetPackage) {
                 Log.d(TAG, "Detected entry to WhatsApp; unlocked=${isUnlockedForWhatsApp()}")
-                if (!isUnlockedForWhatsApp()) {
+                // Evita relanzar si ya está desbloqueado, si la última package es la propia app,
+                // o si acabamos de mostrar la pantalla (debounce)
+                val now = System.currentTimeMillis()
+                if (!isUnlockedForWhatsApp() && lastPackage != packageName && (now - lastShowTime) > 1000L) {
+                    lastShowTime = now
                     showLockScreen()
                 } else {
-                    Log.d(TAG, "Already unlocked for this WhatsApp session.")
+                    Log.d(TAG, "No need to show lock (already unlocked, lastPackage==self, or debounce).")
                 }
             }
 
+            // Si salimos de WhatsApp, reseteamos el flag de desbloqueo
             if (lastPackage == targetPackage && pkg != targetPackage) {
                 Log.d(TAG, "Detected exit from WhatsApp. Resetting unlocked flag.")
                 setUnlockedForWhatsApp(false)
