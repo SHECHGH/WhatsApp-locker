@@ -1,4 +1,32 @@
-name: Build Debug APK
-  run: |
-    gradle wrapper --gradle-version 8.1
-    ./gradlew assembleDebug
+name: Build Android APK
+
+# Elige cuándo se va a ejecutar este flujo de trabajo
+on:
+  push:
+    branches: [ "main", "master" ] # Se ejecuta cuando subes cambios a main o master
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Esto te permite activar el botón de ejecución manual en GitHub
+
+jobs:
+  build:
+    runs-on: ubuntu-latest # El sistema operativo virtual donde correrá el proceso
+
+    steps:
+      # 1. Descarga el código de tu repositorio en la máquina virtual
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      # 2. Configura Java (necesario para compilar aplicaciones Android)
+      - name: Configurar JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # 3. Tus comandos para compilar el APK (lo que tenías originalmente)
+      - name: Build Debug APK
+        run: |
+          gradle wrapper --gradle-version 8.1
+          chmod +x gradlew
+          ./gradlew assembleDebug
