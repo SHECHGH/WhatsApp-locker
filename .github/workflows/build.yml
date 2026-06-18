@@ -1,4 +1,4 @@
-- name: Build Debug APK
+name: Build Debug APK
   run: |
     gradle wrapper --gradle-version 8.1
     ./gradlew assembleDebug
