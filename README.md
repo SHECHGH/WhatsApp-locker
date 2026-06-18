@@ -1,0 +1,4 @@
+English:
+Hi everyone, in this repository I'm trying to create a blocker for WhatsApp, because there are many people who don't have fingerprints on our phones, and therefore we can't protect access to WhatsApp. I don't like the idea of the app making a third-party PIN, it's very conventional, it's better if it asks for your phone's PIN or pattern. More secure and more native, for redundancy's sake. It might have flaws because I'm not very experienced in programming.
+Español:
+Hi everyone, in this repository I'm trying to create a blocker for WhatsApp, because there are many people who don't have fingerprints on our phones, and therefore we can't protect access to WhatsApp. I don't like the idea of the app making a third-party PIN, it's very conventional, it's better if it asks for your phone's PIN or pattern. More secure and more native, for redundancy's sake. It might have flaws because I'm not very experienced in programming.
