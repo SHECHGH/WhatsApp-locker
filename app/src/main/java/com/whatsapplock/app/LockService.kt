@@ -1,9 +1,9 @@
 package com.whatsapplock.app
 
 import android.accessibilityservice.AccessibilityService
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
+import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
@@ -14,23 +14,38 @@ import android.view.accessibility.AccessibilityEvent
 class LockService : AccessibilityService() {
 
     private val TAG = "LockService"
+    private var lastPackage: String? = null
     private val targetPackage = "com.whatsapp"
-    private val PREFS_NAME = "whlock_prefs"
-    private val KEY_UNLOCKED = "unlocked_whatsapp"
-    private val KEY_LAST_AUTH_TS = "last_authenticated_at"
+    private var lastShowTime: Long = 0L
 
     // Timeout para reset automático después de autenticación exitosa (ms)
     private val UNLOCK_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutos
 
-    private var lastPackage: String? = null
-    private var lastShowTime: Long = 0L
+    private val PREFS_NAME = "whlock_prefs"
+    private val KEY_UNLOCKED = "unlocked_whatsapp"
+    private val KEY_LAST_AUTH_TS = "last_authenticated_at"
 
     private fun prefs() = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private fun isUnlockedForWhatsApp(): Boolean = prefs().getBoolean(KEY_UNLOCKED, false)
     private fun setUnlockedForWhatsApp(value: Boolean) = prefs().edit().putBoolean(KEY_UNLOCKED, value).apply()
     private fun getLastAuthTs(): Long = prefs().getLong(KEY_LAST_AUTH_TS, 0L)
-    private fun setLastAuthTs(ts: Long) = prefs().edit().putLong(KEY_LAST_AUTH_TS, ts).apply()
     private fun clearLastAuthTs() = prefs().edit().remove(KEY_LAST_AUTH_TS).apply()
+
+    // Receiver para resetear lastPackage cuando LockActivity notifica cancelación
+    private val resetReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "Received RESET_LAST_PACKAGE; clearing lastPackage")
+            lastPackage = null
+        }
+    }
+
+    // Receiver para saber que hubo autenticación exitosa y arrancar monitoreo
+    private val authReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "Received AUTH_SUCCESS; starting session monitor")
+            startSessionMonitor()
+        }
+    }
 
     // Handler + Runnable para monitor periodic (usa rootInActiveWindow)
     private val handler = Handler(Looper.getMainLooper())
@@ -95,26 +110,6 @@ class LockService : AccessibilityService() {
         Log.d(TAG, "Session monitor stopped")
     }
 
-    // Receiver para resetear lastPackage cuando LockActivity notifica cancelación
-    private val resetReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            Log.d(TAG, "Received RESET_LAST_PACKAGE; clearing lastPackage")
-            lastPackage = null
-        }
-    }
-
-    // Receiver para saber que hubo autenticación exitosa y arrancar monitoreo
-    private val authReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            Log.d(TAG, "Received AUTH_SUCCESS; starting session monitor")
-            // Guardar timestamp si viene en extras (opcional)
-            val ts = intent?.getLongExtra("auth_ts", System.currentTimeMillis()) ?: System.currentTimeMillis()
-            setLastAuthTs(ts)
-            setUnlockedForWhatsApp(true)
-            startSessionMonitor()
-        }
-    }
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         try {
@@ -130,6 +125,7 @@ class LockService : AccessibilityService() {
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "Failed to register receivers", e)
+            // Fallback: no podemos registrar; seguir sin receivers (evita crash)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register receivers (unknown)", e)
         }
@@ -164,15 +160,8 @@ class LockService : AccessibilityService() {
         // y reseteamos unlocked cuando salimos de com.whatsapp.
         if (pkg == targetPackage) {
             Log.d(TAG, "Saw package == targetPackage; unlocked=${isUnlockedForWhatsApp()} last=$lastPackage")
-            // Si está desbloqueado, arrancar monitor si no se está ejecutando (fallback robusto)
-            if (isUnlockedForWhatsApp()) {
-                if (!monitoring && getLastAuthTs() > 0L) {
-                    Log.d(TAG, "Unlocked detected on event — starting session monitor (fallback)")
-                    startSessionMonitor()
-                }
-                Log.d(TAG, "Already unlocked for WhatsApp; not showing lock")
-            } else {
-                // Mostrar lock solo si no está desbloqueado
+            // Mostrar lock solo si no está desbloqueado
+            if (!isUnlockedForWhatsApp()) {
                 // Evitar relanzar cuando la última package fue nuestra propia app
                 if (lastPackage != packageName) {
                     // Debounce: evita reentradas rápidas
@@ -185,6 +174,8 @@ class LockService : AccessibilityService() {
                 } else {
                     Log.d(TAG, "Last package was self; skipping showLockScreen this pass")
                 }
+            } else {
+                Log.d(TAG, "Already unlocked for WhatsApp; not showing lock")
             }
         } else {
             // Si salimos de WhatsApp, reseteamos el flag y limpiamos la marca de tiempo
