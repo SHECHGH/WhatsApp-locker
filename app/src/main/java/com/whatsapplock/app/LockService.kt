@@ -18,6 +18,7 @@ class LockService : AccessibilityService() {
     private val PREFS_NAME = "whlock_prefs"
     private val KEY_UNLOCKED = "unlocked_whatsapp"
     private val KEY_LAST_AUTH_TS = "last_authenticated_at"
+    private val KEY_SUPPRESS_UNTIL = "suppress_until_ms"
 
     // Timeout para reset automático después de autenticación exitosa (ms)
     private val UNLOCK_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutos
@@ -25,12 +26,23 @@ class LockService : AccessibilityService() {
     private var lastPackage: String? = null
     private var lastShowTime: Long = 0L
 
+    // Supresión temporal después de Cancel (ms epoch)
+    private var suppressUntilMs: Long = 0L
+
     private fun prefs() = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private fun isUnlockedForWhatsApp(): Boolean = prefs().getBoolean(KEY_UNLOCKED, false)
     private fun setUnlockedForWhatsApp(value: Boolean) = prefs().edit().putBoolean(KEY_UNLOCKED, value).apply()
     private fun getLastAuthTs(): Long = prefs().getLong(KEY_LAST_AUTH_TS, 0L)
     private fun setLastAuthTs(ts: Long) = prefs().edit().putLong(KEY_LAST_AUTH_TS, ts).apply()
     private fun clearLastAuthTs() = prefs().edit().remove(KEY_LAST_AUTH_TS).apply()
+
+    private fun setSuppressUntil(untilMs: Long) {
+        suppressUntilMs = untilMs
+        prefs().edit().putLong(KEY_SUPPRESS_UNTIL, untilMs).apply()
+    }
+    private fun loadSuppressUntil() {
+        suppressUntilMs = prefs().getLong(KEY_SUPPRESS_UNTIL, 0L)
+    }
 
     // Handler + Runnable para monitor periodic (usa rootInActiveWindow)
     private val handler = Handler(Looper.getMainLooper())
@@ -100,6 +112,14 @@ class LockService : AccessibilityService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.d(TAG, "Received RESET_LAST_PACKAGE; clearing lastPackage")
             lastPackage = null
+
+            // Si vienen ms de supresión, aplicarlos
+            val suppressMs = intent?.getLongExtra("suppress_ms", 0L) ?: 0L
+            if (suppressMs > 0L) {
+                val until = System.currentTimeMillis() + suppressMs
+                Log.d(TAG, "Applying suppression until $until (+$suppressMs ms)")
+                setSuppressUntil(until)
+            }
         }
     }
 
@@ -111,12 +131,16 @@ class LockService : AccessibilityService() {
             val ts = intent?.getLongExtra("auth_ts", System.currentTimeMillis()) ?: System.currentTimeMillis()
             setLastAuthTs(ts)
             setUnlockedForWhatsApp(true)
+            // Limpia supresión si quedara
+            setSuppressUntil(0L)
             startSessionMonitor()
         }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        // cargar supresión previa si existe
+        loadSuppressUntil()
         try {
             // Android 13+ requiere indicar si el receiver será expuesto o no.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -141,17 +165,18 @@ class LockService : AccessibilityService() {
         val eventType = event.eventType
         val pkg = event.packageName?.toString() ?: "null"
 
-        Log.d(TAG, "onAccessibilityEvent type=$eventType pkg=$pkg last=$lastPackage unlocked=${isUnlockedForWhatsApp()} lastAuthTs=${getLastAuthTs()}")
+        // LOG compacto para debug
+        Log.d(TAG, "onAccessibilityEvent type=$eventType pkg=$pkg last=$lastPackage unlocked=${isUnlockedForWhatsApp()} lastAuthTs=${getLastAuthTs()} suppressUntilMs=$suppressUntilMs")
 
-        // Manejar tipos compatibles: cambio de ventana o cambios en contenido de la ventana
-        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-            && eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+        // PROTECCIÓN: procesar SOLO cambios de estado de ventana (no content changes)
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // ignorar TYPE_WINDOW_CONTENT_CHANGED y otros para evitar re-shows dentro de la misma app
             return
         }
 
         val now = System.currentTimeMillis()
 
-        // Safety: si había una autenticación previa y ya pasó el timeout, reseteamos el unlocked para evitar quedarse abierto indefinidamente.
+        // Timeout safety
         val lastAuth = getLastAuthTs()
         if (lastAuth > 0 && (now - lastAuth) > UNLOCK_TIMEOUT_MS) {
             Log.d(TAG, "Unlock timeout elapsed on event; resetting unlocked flag")
@@ -160,34 +185,41 @@ class LockService : AccessibilityService() {
             stopSessionMonitor()
         }
 
-        // lógica principal: si vemos com.whatsapp, mostramos LockActivity si corresponde
-        // y reseteamos unlocked cuando salimos de com.whatsapp.
+        // Lógica central:
+        // - Sólo mostrar LockActivity si entramos en WhatsApp desde fuera (lastPackage != targetPackage)
+        // - No mostrar por movimientos internos dentro de WhatsApp (p. ej. abrir chat, ajustes)
         if (pkg == targetPackage) {
+            // Entramos o estamos en WhatsApp
             Log.d(TAG, "Saw package == targetPackage; unlocked=${isUnlockedForWhatsApp()} last=$lastPackage")
-            // Si está desbloqueado, arrancar monitor si no se está ejecutando (fallback robusto)
             if (isUnlockedForWhatsApp()) {
+                // Si está desbloqueado, arrancar el monitor si aún no lo hace (fallback)
                 if (!monitoring && getLastAuthTs() > 0L) {
                     Log.d(TAG, "Unlocked detected on event — starting session monitor (fallback)")
                     startSessionMonitor()
                 }
                 Log.d(TAG, "Already unlocked for WhatsApp; not showing lock")
             } else {
-                // Mostrar lock solo si no está desbloqueado
-                // Evitar relanzar cuando la última package fue nuestra propia app
-                if (lastPackage != packageName) {
-                    // Debounce: evita reentradas rápidas
+                // Si NO está desbloqueado, mostrar Lock ONLY if we came from outside WhatsApp
+                if (lastPackage == null || lastPackage != targetPackage) {
+                    // Debounce y supresión
                     if ((now - lastShowTime) > 1000L) {
-                        lastShowTime = now
-                        showLockScreen()
+                        if (now < suppressUntilMs) {
+                            Log.d(TAG, "Suppressed showLockScreen due to recent cancel (until=$suppressUntilMs). Skipping.")
+                        } else {
+                            lastShowTime = now
+                            showLockScreen()
+                        }
                     } else {
                         Log.d(TAG, "Debounce: skipping showLockScreen")
                     }
                 } else {
-                    Log.d(TAG, "Last package was self; skipping showLockScreen this pass")
+                    // lastPackage == targetPackage -> estamos navegando internamente -> no mostrar
+                    Log.d(TAG, "Inside WhatsApp navigation detected (lastPackage==target). Skipping showLockScreen.")
                 }
             }
         } else {
-            // Si salimos de WhatsApp, reseteamos el flag y limpiamos la marca de tiempo
+            // No estamos en WhatsApp
+            // Si salimos de WhatsApp, resetear estados si procede
             if (lastPackage == targetPackage && pkg != targetPackage) {
                 Log.d(TAG, "Detected exit from WhatsApp on event. Resetting unlocked flag and clearing lastAuthTs.")
                 setUnlockedForWhatsApp(false)
@@ -196,6 +228,7 @@ class LockService : AccessibilityService() {
             }
         }
 
+        // actualizar lastPackage para próximas comparaciones
         lastPackage = pkg
     }
 
