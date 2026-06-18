@@ -27,6 +27,5 @@ jobs:
       # 3. Tus comandos para compilar el APK (lo que tenías originalmente)
       - name: Build Debug APK
         run: |
-          gradle wrapper --gradle-version 8.1
           chmod +x gradlew
           ./gradlew assembleDebug
