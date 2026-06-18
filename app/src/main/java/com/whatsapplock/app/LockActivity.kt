@@ -1,5 +1,7 @@
 package com.whatsapplock.app
 
+import android.app.ActivityManager
+import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
@@ -35,6 +37,14 @@ class LockActivity : AppCompatActivity() {
                 Log.d(TAG, "Authentication failed")
                 val prefs = getSharedPreferences("whlock_prefs", Context.MODE_PRIVATE)
                 prefs.edit().putBoolean("unlocked_whatsapp", false).apply()
+
+                // Intentamos cerrar WhatsApp si el usuario cancela
+                killWhatsAppProcess()
+
+                // notificamos al servicio para que resetee lastPackage y vuelva a pedir PIN la próxima vez
+                val resetIntent = Intent("com.whatsapplock.action.RESET_LAST_PACKAGE")
+                sendBroadcast(resetIntent)
+
                 goHome()
             }
 
@@ -42,6 +52,14 @@ class LockActivity : AppCompatActivity() {
                 Log.d(TAG, "Authentication error $errorCode: $errString")
                 val prefs = getSharedPreferences("whlock_prefs", Context.MODE_PRIVATE)
                 prefs.edit().putBoolean("unlocked_whatsapp", false).apply()
+
+                // Intentamos cerrar WhatsApp si hay error (o cancelación)
+                killWhatsAppProcess()
+
+                // notificamos al servicio que resetee lastPackage
+                val resetIntent = Intent("com.whatsapplock.action.RESET_LAST_PACKAGE")
+                sendBroadcast(resetIntent)
+
                 goHome()
             }
         }
@@ -55,6 +73,16 @@ class LockActivity : AppCompatActivity() {
             .build()
 
         prompt.authenticate(info)
+    }
+
+    private fun killWhatsAppProcess() {
+        try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            am.killBackgroundProcesses("com.whatsapp")
+            Log.d(TAG, "Requested killBackgroundProcesses for com.whatsapp")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to kill WhatsApp process", e)
+        }
     }
 
     private fun goHome() {
