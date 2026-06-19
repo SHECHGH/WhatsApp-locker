@@ -17,7 +17,6 @@ class LockService : AccessibilityService() {
     private val targetPackage = "com.whatsapp"
 
     // Paquetes que consideramos "launcher / pantalla de inicio / recientes" del sistema.
-    // Quitamos com.android.systemui de aquí para que desplegar las notificaciones no te bloquee la app.
     private val launcherPackages = setOf(
         "com.sec.android.app.launcher",   // Samsung One UI launcher
         "com.android.launcher",
@@ -29,7 +28,6 @@ class LockService : AccessibilityService() {
     private val KEY_UNLOCKED = "unlocked_whatsapp"
     private val KEY_LAST_AUTH_TS = "last_authenticated_at"
 
-    // Timeout para reset automático después de autenticación exitosa (ms)
     private val UNLOCK_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutos
 
     private var lastPackage: String? = null
@@ -56,17 +54,14 @@ class LockService : AccessibilityService() {
             try {
                 val now = System.currentTimeMillis()
                 val lastAuth = getLastAuthTs()
-
                 if (lastAuth == 0L) {
                     stopSessionMonitor()
                     return
                 }
-
                 if ((now - lastAuth) > UNLOCK_TIMEOUT_MS) {
                     resetUnlockState("safety timeout elapsed")
                     return
                 }
-
             } catch (e: Exception) {
                 Log.e(TAG, "Session monitor error", e)
             } finally {
@@ -113,16 +108,12 @@ class LockService : AccessibilityService() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(resetReceiver, IntentFilter("com.whatsapplock.action.RESET_LAST_PACKAGE"), Context.RECEIVER_NOT_EXPORTED)
                 registerReceiver(authReceiver, IntentFilter("com.whatsapplock.action.AUTH_SUCCESS"), Context.RECEIVER_NOT_EXPORTED)
-                Log.d(TAG, "resetReceiver & authReceiver registered (RECEIVER_NOT_EXPORTED)")
             } else {
                 registerReceiver(resetReceiver, IntentFilter("com.whatsapplock.action.RESET_LAST_PACKAGE"))
                 registerReceiver(authReceiver, IntentFilter("com.whatsapplock.action.AUTH_SUCCESS"))
-                Log.d(TAG, "resetReceiver & authReceiver registered (legacy)")
             }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Failed to register receivers", e)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to register receivers (unknown)", e)
+            Log.e(TAG, "Failed to register receivers", e)
         }
     }
 
@@ -130,66 +121,59 @@ class LockService : AccessibilityService() {
         if (event == null) return
 
         val eventType = event.eventType
+        val pkg = event.packageName?.toString() ?: "null"
 
-        // CAMBIO 1: Solo permitimos cambios de estado de ventana (abrir/cerrar apps).
-        // Quitamos TYPE_WINDOW_CONTENT_CHANGED para evitar bloqueos al movernos internamente.
+        // Solo procesamos cambios de estado de ventanas completas
         if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             return
         }
 
-        val pkg = event.packageName?.toString() ?: "null"
+        // CORRECCIÓN: Filtramos los paquetes fantasma/ruido dentro de una variable booleana,
+        // en lugar de usar un "return" directo. Así aseguramos que lastPackage se actualice siempre.
+        val isNoisePackage = pkg == "null" || pkg.isBlank() || pkg == "android" || 
+                             pkg == "com.android.systemui" || pkg.contains("inputmethod") || 
+                             pkg.contains("keyboard") || pkg == packageName
 
-        // CAMBIO 2: Filtro extractor de "paquetes ruido". Si es el teclado, heramientas del sistema,
-        // o la barra de notificaciones, ignoramos el evento por completo para no alterar el estado de bloqueo.
-        if (pkg == "null" || pkg.isBlank() || pkg == "android" || pkg == "com.android.systemui" || 
-            pkg.contains("inputmethod") || pkg.contains("keyboard")) {
-            Log.d(TAG, "Ignoring transient/system package: $pkg")
-            return
-        }
-
-        Log.d(TAG, "onAccessibilityEvent type=$eventType pkg=$pkg last=$lastPackage unlocked=${isUnlockedForWhatsApp()} lastAuthTs=${getLastAuthTs()}")
+        Log.d(TAG, "onAccessibilityEvent pkg=$pkg last=$lastPackage noise=$isNoisePackage unlocked=${isUnlockedForWhatsApp()}")
 
         val now = System.currentTimeMillis()
-
         val lastAuth = getLastAuthTs()
         if (lastAuth > 0 && (now - lastAuth) > UNLOCK_TIMEOUT_MS) {
             resetUnlockState("timeout elapsed on event")
         }
 
-        when {
-            // Caso 1: El usuario está interactuando activamente con WhatsApp
-            pkg == targetPackage -> {
-                Log.d(TAG, "Saw package == targetPackage; unlocked=${isUnlockedForWhatsApp()} last=$lastPackage")
-                if (isUnlockedForWhatsApp()) {
-                    if (!monitoring && getLastAuthTs() > 0L) {
-                        startSessionMonitor()
-                    }
-                    Log.d(TAG, "Already unlocked for WhatsApp; not showing lock")
-                } else {
-                    if (lastPackage != packageName) {
-                        if ((now - lastShowTime) > 1000L) {
-                            lastShowTime = now
-                            showLockScreen()
-                        } else {
-                            Log.d(TAG, "Debounce: skipping showLockScreen")
+        // Si NO es un paquete de ruido, evaluamos la lógica de bloqueo/salida
+        if (!isNoisePackage) {
+            when {
+                // Caso 1: Estamos interactuando activamente con WhatsApp
+                pkg == targetPackage -> {
+                    if (isUnlockedForWhatsApp()) {
+                        if (!monitoring && getLastAuthTs() > 0L) {
+                            startSessionMonitor()
                         }
                     } else {
-                        Log.d(TAG, "Last package was self; skipping showLockScreen this pass")
+                        if (lastPackage != packageName) {
+                            if ((now - lastShowTime) > 1000L) {
+                                lastShowTime = now
+                                showLockScreen()
+                            }
+                        }
                     }
                 }
-            }
 
-            // Caso 2: El usuario salió explícitamente a un launcher o pantalla de inicio viniendo de WhatsApp
-            pkg in launcherPackages && lastPackage == targetPackage -> {
-                resetUnlockState("user navigated to home/recents from WhatsApp")
-            }
+                // Caso 2: Salida explícita al Launcher / Home viniendo de WhatsApp
+                pkg in launcherPackages && lastPackage == targetPackage -> {
+                    resetUnlockState("user navigated to home/recents from WhatsApp")
+                }
 
-            // Caso 3: El usuario saltó directamente a otra aplicación (ej. pulsando una notificación o link) viniendo de WhatsApp
-            pkg != targetPackage && pkg != packageName && pkg !in launcherPackages && lastPackage == targetPackage -> {
-                resetUnlockState("user opened another app ($pkg) from WhatsApp")
+                // Caso 3: Apertura de otra aplicación viniendo de WhatsApp
+                pkg != targetPackage && pkg !in launcherPackages && lastPackage == targetPackage -> {
+                    resetUnlockState("user opened another app ($pkg) from WhatsApp")
+                }
             }
         }
 
+        // Se guarda SIEMPRE el paquete actual como referencia para el siguiente evento (evita congelamiento de historial)
         if (pkg != packageName) {
             lastPackage = pkg
         }
@@ -206,15 +190,12 @@ class LockService : AccessibilityService() {
         }
     }
 
-    override fun onInterrupt() {
-        Log.d(TAG, "onInterrupt")
-    }
+    override fun onInterrupt() {}
 
     override fun onDestroy() {
         super.onDestroy()
-        try { unregisterReceiver(resetReceiver) } catch (e: Exception) { /* ignore */ }
-        try { unregisterReceiver(authReceiver) } catch (e: Exception) { /* ignore */ }
+        try { unregisterReceiver(resetReceiver) } catch (e: Exception) {}
+        try { unregisterReceiver(authReceiver) } catch (e: Exception) {}
         stopSessionMonitor()
-        Log.d(TAG, "receivers unregistered and monitor stopped")
     }
 }
