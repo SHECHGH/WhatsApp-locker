@@ -17,18 +17,17 @@ class LockService : AccessibilityService() {
     private val targetPackage = "com.whatsapp"
 
     private val launcherPackages = setOf(
-        "com.sec.android.app.launcher",   // Samsung One UI
+        "com.sec.android.app.launcher",   // Samsung One UI launcher
         "com.android.launcher",
         "com.android.launcher3",
-        "com.google.android.apps.nexuslauncher",
-        "com.android.systemui"            // Barra de tareas / Recientes
+        "com.google.android.apps.nexuslauncher"
     )
 
     private val PREFS_NAME = "whlock_prefs"
     private val KEY_UNLOCKED = "unlocked_whatsapp"
     private val KEY_LAST_AUTH_TS = "last_authenticated_at"
 
-    private val UNLOCK_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutos de sesión activa
+    private val UNLOCK_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutos
 
     private var lastPackage: String? = null
     private var lastShowTime: Long = 0L
@@ -48,6 +47,31 @@ class LockService : AccessibilityService() {
     }
 
     private val handler = Handler(Looper.getMainLooper())
+    
+    // ------------- NUEVO: Sistema de Debounce (Tiempo de Gracia) -------------
+    private var pendingLockRunnable: Runnable? = null
+
+    private fun scheduleLock(reason: String) {
+        if (pendingLockRunnable == null) {
+            Log.d(TAG, "Scheduling lock in 1.5s. Reason: $reason")
+            pendingLockRunnable = Runnable {
+                resetUnlockState(reason)
+                pendingLockRunnable = null
+            }
+            // Damos 1.5 segundos de gracia antes de cerrar el candado real
+            handler.postDelayed(pendingLockRunnable!!, 1500L) 
+        }
+    }
+
+    private fun cancelPendingLock() {
+        pendingLockRunnable?.let {
+            handler.removeCallbacks(it)
+            pendingLockRunnable = null
+            Log.d(TAG, "Canceled pending lock (user returned to WhatsApp quickly)")
+        }
+    }
+    // -------------------------------------------------------------------------
+
     @Volatile private var monitoring = false
     private val monitorRunnable = object : Runnable {
         override fun run() {
@@ -76,24 +100,30 @@ class LockService : AccessibilityService() {
         if (monitoring) return
         monitoring = true
         handler.post(monitorRunnable)
+        Log.d(TAG, "Session monitor started")
     }
 
     private fun stopSessionMonitor() {
         monitoring = false
         handler.removeCallbacks(monitorRunnable)
+        Log.d(TAG, "Session monitor stopped")
     }
 
     private val resetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "Received RESET_LAST_PACKAGE; clearing lastPackage")
             lastPackage = null
+            cancelPendingLock()
         }
     }
 
     private val authReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "Received AUTH_SUCCESS; starting session monitor")
             val ts = intent?.getLongExtra("auth_ts", System.currentTimeMillis()) ?: System.currentTimeMillis()
             setLastAuthTs(ts)
             setUnlockedForWhatsApp(true)
+            cancelPendingLock()
             startSessionMonitor()
         }
     }
@@ -119,15 +149,17 @@ class LockService : AccessibilityService() {
         val eventType = event.eventType
         val pkg = event.packageName?.toString() ?: "null"
 
-        // Solo nos importan los cambios de estado de ventana (Activities)
         if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             return
         }
 
-        // Filtro básico para omitir ruido de paquetes vacíos o de nuestra propia pantalla de bloqueo
-        if (pkg == "null" || pkg.isBlank() || pkg == packageName) {
-            return
-        }
+        // Agregamos honeyboard (teclado de samsung) por seguridad
+        val isNoisePackage = pkg == "null" || pkg.isBlank() || pkg == "android" || 
+                             pkg == "com.android.systemui" || pkg.contains("inputmethod") || 
+                             pkg.contains("keyboard") || pkg.contains("honeyboard") || 
+                             pkg == packageName
+
+        Log.d(TAG, "onAccessibilityEvent pkg=$pkg last=$lastPackage noise=$isNoisePackage unlocked=${isUnlockedForWhatsApp()}")
 
         val now = System.currentTimeMillis()
         val lastAuth = getLastAuthTs()
@@ -135,49 +167,47 @@ class LockService : AccessibilityService() {
             resetUnlockState("timeout elapsed on event")
         }
 
-        // --- CLAVE DE LA SOLUCIÓN ---
-        // Si el usuario ya está autenticado y el evento ocurre DENTRO de WhatsApp,
-        // ignoramos por completo el evento. No recalculamos ni disparamos bloqueos.
-        if (pkg == targetPackage && isUnlockedForWhatsApp()) {
-            if (!monitoring && getLastAuthTs() > 0L) {
-                startSessionMonitor()
-            }
-            // Guardamos el paquete actual y salimos pacíficamente
-            lastPackage = pkg
-            return
-        }
-
-        // Si no se cumple lo anterior, evaluamos las transiciones de salida/entrada
-        when {
-            // Caso 1: El usuario entra a WhatsApp desde afuera (y no está desbloqueado)
-            pkg == targetPackage -> {
-                if (!isUnlockedForWhatsApp()) {
-                    if (lastPackage != packageName) {
-                        if ((now - lastShowTime) > 1000L) {
-                            lastShowTime = now
-                            showLockScreen()
+        if (!isNoisePackage) {
+            when {
+                // Caso 1: Estamos en WhatsApp
+                pkg == targetPackage -> {
+                    // ¡El usuario sigue aquí! Cancelamos cualquier bloqueo programado
+                    cancelPendingLock()
+                    
+                    if (isUnlockedForWhatsApp()) {
+                        if (!monitoring && getLastAuthTs() > 0L) {
+                            startSessionMonitor()
+                        }
+                    } else {
+                        if (lastPackage != packageName) {
+                            if ((now - lastShowTime) > 1000L) {
+                                lastShowTime = now
+                                showLockScreen()
+                            }
                         }
                     }
                 }
-            }
 
-            // Caso 2: El usuario salió al Launcher viniendo de WhatsApp
-            pkg in launcherPackages && lastPackage == targetPackage -> {
-                resetUnlockState("user navigated to home/recents from WhatsApp")
-            }
+                // Caso 2: Salida explícita al Launcher / Home
+                pkg in launcherPackages && lastPackage == targetPackage -> {
+                    scheduleLock("user navigated to home/recents from WhatsApp")
+                }
 
-            // Caso 3: El usuario abrió OTRA aplicación viniendo de WhatsApp
-            pkg != targetPackage && pkg !in launcherPackages && lastPackage == targetPackage -> {
-                resetUnlockState("user opened another app ($pkg) from WhatsApp")
+                // Caso 3: Apertura de otra aplicación
+                pkg != targetPackage && pkg !in launcherPackages && lastPackage == targetPackage -> {
+                    scheduleLock("user opened another app ($pkg) from WhatsApp")
+                }
             }
         }
 
-        // Siempre actualizamos el historial de navegación al final
-        lastPackage = pkg
+        if (pkg != packageName) {
+            lastPackage = pkg
+        }
     }
 
     private fun showLockScreen() {
         try {
+            Log.d(TAG, "showLockScreen() starting LockActivity")
             val intent = Intent(this, LockActivity::class.java)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             startActivity(intent)
@@ -193,5 +223,6 @@ class LockService : AccessibilityService() {
         try { unregisterReceiver(resetReceiver) } catch (e: Exception) {}
         try { unregisterReceiver(authReceiver) } catch (e: Exception) {}
         stopSessionMonitor()
+        cancelPendingLock()
     }
 }
