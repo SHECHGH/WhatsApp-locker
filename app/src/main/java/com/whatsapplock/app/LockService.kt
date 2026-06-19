@@ -16,7 +16,6 @@ class LockService : AccessibilityService() {
     private val TAG = "LockService"
     private val targetPackage = "com.whatsapp"
 
-    // Paquetes que consideramos "launcher / pantalla de inicio / recientes" del sistema.
     private val launcherPackages = setOf(
         "com.sec.android.app.launcher",   // Samsung One UI launcher
         "com.android.launcher",
@@ -48,6 +47,31 @@ class LockService : AccessibilityService() {
     }
 
     private val handler = Handler(Looper.getMainLooper())
+    
+    // ------------- NUEVO: Sistema de Debounce (Tiempo de Gracia) -------------
+    private var pendingLockRunnable: Runnable? = null
+
+    private fun scheduleLock(reason: String) {
+        if (pendingLockRunnable == null) {
+            Log.d(TAG, "Scheduling lock in 1.5s. Reason: $reason")
+            pendingLockRunnable = Runnable {
+                resetUnlockState(reason)
+                pendingLockRunnable = null
+            }
+            // Damos 1.5 segundos de gracia antes de cerrar el candado real
+            handler.postDelayed(pendingLockRunnable!!, 1500L) 
+        }
+    }
+
+    private fun cancelPendingLock() {
+        pendingLockRunnable?.let {
+            handler.removeCallbacks(it)
+            pendingLockRunnable = null
+            Log.d(TAG, "Canceled pending lock (user returned to WhatsApp quickly)")
+        }
+    }
+    // -------------------------------------------------------------------------
+
     @Volatile private var monitoring = false
     private val monitorRunnable = object : Runnable {
         override fun run() {
@@ -89,6 +113,7 @@ class LockService : AccessibilityService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.d(TAG, "Received RESET_LAST_PACKAGE; clearing lastPackage")
             lastPackage = null
+            cancelPendingLock()
         }
     }
 
@@ -98,6 +123,7 @@ class LockService : AccessibilityService() {
             val ts = intent?.getLongExtra("auth_ts", System.currentTimeMillis()) ?: System.currentTimeMillis()
             setLastAuthTs(ts)
             setUnlockedForWhatsApp(true)
+            cancelPendingLock()
             startSessionMonitor()
         }
     }
@@ -123,16 +149,15 @@ class LockService : AccessibilityService() {
         val eventType = event.eventType
         val pkg = event.packageName?.toString() ?: "null"
 
-        // Solo procesamos cambios de estado de ventanas completas
         if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             return
         }
 
-        // CORRECCIÓN: Filtramos los paquetes fantasma/ruido dentro de una variable booleana,
-        // en lugar de usar un "return" directo. Así aseguramos que lastPackage se actualice siempre.
+        // Agregamos honeyboard (teclado de samsung) por seguridad
         val isNoisePackage = pkg == "null" || pkg.isBlank() || pkg == "android" || 
                              pkg == "com.android.systemui" || pkg.contains("inputmethod") || 
-                             pkg.contains("keyboard") || pkg == packageName
+                             pkg.contains("keyboard") || pkg.contains("honeyboard") || 
+                             pkg == packageName
 
         Log.d(TAG, "onAccessibilityEvent pkg=$pkg last=$lastPackage noise=$isNoisePackage unlocked=${isUnlockedForWhatsApp()}")
 
@@ -142,11 +167,13 @@ class LockService : AccessibilityService() {
             resetUnlockState("timeout elapsed on event")
         }
 
-        // Si NO es un paquete de ruido, evaluamos la lógica de bloqueo/salida
         if (!isNoisePackage) {
             when {
-                // Caso 1: Estamos interactuando activamente con WhatsApp
+                // Caso 1: Estamos en WhatsApp
                 pkg == targetPackage -> {
+                    // ¡El usuario sigue aquí! Cancelamos cualquier bloqueo programado
+                    cancelPendingLock()
+                    
                     if (isUnlockedForWhatsApp()) {
                         if (!monitoring && getLastAuthTs() > 0L) {
                             startSessionMonitor()
@@ -161,19 +188,18 @@ class LockService : AccessibilityService() {
                     }
                 }
 
-                // Caso 2: Salida explícita al Launcher / Home viniendo de WhatsApp
+                // Caso 2: Salida explícita al Launcher / Home
                 pkg in launcherPackages && lastPackage == targetPackage -> {
-                    resetUnlockState("user navigated to home/recents from WhatsApp")
+                    scheduleLock("user navigated to home/recents from WhatsApp")
                 }
 
-                // Caso 3: Apertura de otra aplicación viniendo de WhatsApp
+                // Caso 3: Apertura de otra aplicación
                 pkg != targetPackage && pkg !in launcherPackages && lastPackage == targetPackage -> {
-                    resetUnlockState("user opened another app ($pkg) from WhatsApp")
+                    scheduleLock("user opened another app ($pkg) from WhatsApp")
                 }
             }
         }
 
-        // Se guarda SIEMPRE el paquete actual como referencia para el siguiente evento (evita congelamiento de historial)
         if (pkg != packageName) {
             lastPackage = pkg
         }
@@ -197,5 +223,6 @@ class LockService : AccessibilityService() {
         try { unregisterReceiver(resetReceiver) } catch (e: Exception) {}
         try { unregisterReceiver(authReceiver) } catch (e: Exception) {}
         stopSessionMonitor()
+        cancelPendingLock()
     }
 }
