@@ -14,14 +14,11 @@ class LockActivity : AppCompatActivity() {
 
     private val TAG = "LockActivity"
 
-    // Keys for SharedPreferences
     private val PREFS_NAME = "whlock_prefs"
     private val KEY_UNLOCKED = "unlocked_whatsapp"
-    private val KEY_LAST_AUTH_TS = "last_authenticated_at"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // No es necesario setContentView si solo usamos BiometricPrompt
         showPinPrompt()
     }
 
@@ -32,12 +29,9 @@ class LockActivity : AppCompatActivity() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                 Log.d(TAG, "Authentication succeeded")
                 val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.edit()
-                    .putBoolean(KEY_UNLOCKED, true)
-                    .putLong(KEY_LAST_AUTH_TS, System.currentTimeMillis())
-                    .apply()
+                prefs.edit().putBoolean(KEY_UNLOCKED, true).apply()
 
-                // Notificamos al servicio que arrancó una sesión autenticada
+                // Notificamos al servicio que se desbloqueó correctamente
                 val authIntent = Intent("com.whatsapplock.action.AUTH_SUCCESS")
                 sendBroadcast(authIntent)
 
@@ -46,32 +40,12 @@ class LockActivity : AppCompatActivity() {
 
             override fun onAuthenticationFailed() {
                 Log.d(TAG, "Authentication failed")
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.edit().putBoolean(KEY_UNLOCKED, false).apply()
-
-                // Intentamos cerrar WhatsApp si el usuario cancela
-                killWhatsAppProcess()
-
-                // notificamos al servicio para que resetee lastPackage y vuelva a pedir PIN la próxima vez
-                val resetIntent = Intent("com.whatsapplock.action.RESET_LAST_PACKAGE")
-                sendBroadcast(resetIntent)
-
-                goHome()
+                handleAuthFailure()
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                 Log.d(TAG, "Authentication error $errorCode: $errString")
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.edit().putBoolean(KEY_UNLOCKED, false).apply()
-
-                // Intentamos cerrar WhatsApp si hay error (o cancelación)
-                killWhatsAppProcess()
-
-                // notificamos al servicio que resetee lastPackage
-                val resetIntent = Intent("com.whatsapplock.action.RESET_LAST_PACKAGE")
-                sendBroadcast(resetIntent)
-
-                goHome()
+                handleAuthFailure()
             }
         }
 
@@ -84,6 +58,20 @@ class LockActivity : AppCompatActivity() {
             .build()
 
         prompt.authenticate(info)
+    }
+
+    private fun handleAuthFailure() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_UNLOCKED, false).apply()
+
+        // Forzamos el cierre en segundo plano de WhatsApp para asegurar la protección
+        killWhatsAppProcess()
+
+        // Notificamos al servicio que limpie referencias anteriores
+        val resetIntent = Intent("com.whatsapplock.action.RESET_LAST_PACKAGE")
+        sendBroadcast(resetIntent)
+
+        goHome()
     }
 
     private fun killWhatsAppProcess() {
